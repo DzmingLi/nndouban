@@ -1531,7 +1531,7 @@ for the existing asynchronous website adapter.  Never retry uncertain sends."
     (nndouban--save store)))
 
 ;; A news-like backend: d changes reading state; it never deletes a web post.
-(add-to-list 'gnus-valid-select-methods '(nndouban "douban"))
+(gnus-declare-backend "nndouban" 'post)
 (nnoo-define-skeleton nndouban)
 (provide 'nndouban)
 ;;; nndouban.el ends here
