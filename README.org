@@ -5,15 +5,18 @@
 
 * 入口
 
-支持三类订阅：
+支持四类订阅：
 
 - ~M-x nndouban-subscribe-timeline~ ：输入某人的数字用户 ID。
 - ~M-x nndouban-subscribe-replies~ ：当前 Firefox 账号的“回应我的”。
 - ~M-x nndouban-subscribe-group-topic~ ：按豆瓣小组帖子 URL 订阅一篇帖子。
+- ~M-x nndouban-subscribe-group~ ：输入小组数字 ID，订阅该组最近的帖子。
 
-内部组名分别为 ~timeline.USER~、~replies.ACCOUNT~ 和 ~topic.ID~ 。广播和个人话题是时间线
+内部组名分别为 ~timeline.USER~、~replies.ACCOUNT~、~topic.ID~ 和 ~group.ID~ 。广播和个人话题是时间线
 里的内容类型；不单独创建“个人话题订阅”。书影音活动显示时间线卡片，打开后
-查看该广播下的评论，也支持已订阅小组帖的楼层与子回复。尚不支持书评、影评评论区。
+查看该广播下的评论，也支持小组帖的楼层与子回复。小组订阅抓取最近一页的
+帖子索引，保留以前抓取的帖子；打开帖子时再获取正文和完整回复。
+尚不支持书评、影评评论区。
 ~nndouban-timeline-excluded-title-fragments~ 可按用户 ID 排除标题中的指定字串，
 便于从旧 Elfeed 订阅迁移时保留原有过滤规则。
 
@@ -53,8 +56,10 @@ Gnus 列表每个讨论只占一行。按 ~RET~ 或 ~C-c C-t~ 载入完整讨论
 Gnus 原生缓存，~o~ 打开原生文章视图，~s~ 回到列表。读取或移动不会自动标已读。
 
 ~r~ 在所选楼层使用 Gnus / message-mode 撰写跟帖，~C-u r~ 引用原文。
-发送走豆瓣 API；支持纯文本，不支持附件或跨组发送。小组新帖使用
-~M-x nndouban-new-group-topic~，输入小组数字 ID，随后在 Message 中填写标题和正文。
+发送走豆瓣 API；支持纯文本，不支持附件或跨组发送。发小组新帖使用 Gnus
+Group buffer 的 ~C-u a~ 从组名补全中选小组，或在目标小组上按 ~C-u C-u a~；
+在 Summary buffer 中按 ~a~ 默认发到当前小组。随后在 Message 中填写标题和正文。
+也可用 ~M-x nndouban-new-group-topic~ 直接输入未订阅小组的数字 ID。
 超时或响应未确认
 时保留草稿并锁住同一提交，防止重复发布。只有在网站核实未发布后才使用
 ~nndouban-clear-uncertain-sends~ 解锁。相同内容向同一楼的已确认提交不会再次发送。

@@ -10,7 +10,7 @@
 
 ;;; Commentary:
 
-;; Subscription types: timeline.USER, replies.ACCOUNT and topic.ID.  The normal
+;; Subscription types: timeline.USER, replies.ACCOUNT, group.ID and topic.ID.  The normal
 ;; Gnus overview contains one article per discussion.  Replies are cached as
 ;; real messages with stable numbers and References, exposed by request-thread.
 ;; Fetching is asynchronous; Gnus article reads use the local snapshot only.
@@ -59,13 +59,16 @@ Each fragment is matched literally within the discussion title."
   id)
 
 (defun nndouban-source--group-page (url callback)
-  "Read group topic URL and call CALLBACK with (HTML ERROR).
+  "Read group or group topic URL and call CALLBACK with (HTML ERROR).
 The desktop group page can reject curl even when Emacs's URL transport works.
 Do not follow redirects with Cookie headers."
-  (unless (thread-reader-douban--group-topic-p url)
-    (error "Unsupported Douban group topic URL"))
+  (unless (or (thread-reader-douban--group-topic-p url)
+              (string-match-p
+               "\\`https://www\\.douban\\.com/group/[1-9][0-9]*/\\'" url))
+    (error "Unsupported Douban group URL"))
   (condition-case nil
-      (let* ((cookies (funcall thread-reader-douban-cookie-function url))
+      (let* ((cookies (when (thread-reader-douban--group-topic-p url)
+                        (funcall thread-reader-douban-cookie-function url)))
              (url-request-method "GET")
              (url-max-redirections 0)
              (url-request-extra-headers
@@ -84,10 +87,83 @@ Do not follow redirects with Cookie headers."
                   (error "Douban group topic access denied"))
                 (unless (re-search-forward "\r?\n\r?\n" nil t)
                   (error "Douban group topic response has no body"))
-                (funcall callback
-                         (buffer-substring-no-properties (point) (point-max)) nil))
+                (let ((body (buffer-substring-no-properties (point) (point-max))))
+                  (funcall callback
+                           (if (multibyte-string-p body) body
+                             (decode-coding-string body 'utf-8)) nil)))
             (kill-buffer (current-buffer)))))
-    (error (funcall callback nil "Douban group topic access denied; check Firefox login"))))
+    (error (funcall callback nil "Douban group page access denied; check Firefox login"))))
+
+(defun nndouban-source--group-time (value)
+  "Normalize a group listing's last-reply VALUE to local date and time."
+  (let ((value (string-trim value)))
+    (cond
+     ((string-match-p "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\'" value)
+      (concat value " 00:00:00"))
+     ((string-match-p
+       "\\`[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\} [0-9]\\{2\\}:[0-9]\\{2\\}\\'"
+       value)
+      (concat value ":00"))
+     ((string-match-p "\\`[0-9]\\{2\\}-[0-9]\\{2\\} [0-9]\\{2\\}:[0-9]\\{2\\}\\'" value)
+      (let* ((year (format-time-string "%Y" (current-time) 28800))
+             (candidate (concat year "-" value ":00")))
+        (when (time-less-p (time-add (current-time) (days-to-time 1))
+                           (date-to-time (concat candidate " +0800")))
+          (setq candidate (concat (number-to-string (1- (string-to-number year)))
+                                  "-" value ":00")))
+        candidate))
+     (t (error "Unknown Douban group listing time: %s" value)))))
+
+(defun nndouban-source--group-discussions (html)
+  "Parse HTML group listing into lightweight topic discussions."
+  (let* ((document (with-temp-buffer
+                     (insert html)
+                     (libxml-parse-html-region (point-min) (point-max))))
+         (table (car (dom-by-class document "\\bolt\\b")))
+         discussions)
+    (unless table (error "Douban group listing has no topic table"))
+    (dolist (row (dom-by-tag table 'tr))
+      (when-let* ((title-cell (car (dom-by-class row "\\btitle\\b")))
+                  (anchor (car (dom-by-tag title-cell 'a)))
+                  (href (dom-attr anchor 'href))
+                  ((string-match
+                    "\\`https://www\\.douban\\.com/group/topic/\\([1-9][0-9]*\\)/" href)))
+        (let* ((id (match-string 1 href))
+               (url (format "https://www.douban.com/group/topic/%s/" id))
+               (title (string-trim (or (dom-attr anchor 'title)
+                                       (dom-texts anchor))))
+               (author-link (car (dom-by-tag (nth 1 (dom-by-tag row 'td)) 'a)))
+               (author (if author-link (string-trim (dom-texts author-link)) "豆瓣用户"))
+               (author-url (and author-link (dom-attr author-link 'href)))
+               (author-id (and author-url
+                               (string-match "/people/\\([0-9]+\\)/" author-url)
+                               (match-string 1 author-url)))
+               (time-cell (car (dom-by-class row "\\btime\\b")))
+               (time (and time-cell (nndouban-source--group-time
+                                     (dom-texts time-cell)))))
+          (when (and (not (string-empty-p title)) time)
+            (push (make-thread-reader-discussion
+                   :id id :url url :title title :cursor '(:kind comments :start 0)
+                   :entries (list (make-nndouban-source-entry
+                                   :id (concat "topic:" id) :author author
+                                   :author-id author-id :time time :url url
+                                   :body-format 'plain :body "打开帖子以加载正文和回复。"
+                                   :placeholder-p t)))
+                  discussions)))))
+    (unless discussions (error "Douban group listing has no topics"))
+    (nreverse discussions)))
+
+(defun nndouban-source-group (id callback)
+  "Fetch the latest topics in Douban group ID; call CALLBACK with (ITEMS ERROR)."
+  (let ((url (format "https://www.douban.com/group/%s/"
+                     (nndouban-source--group-id id))))
+    (nndouban-source--group-page
+     url
+     (lambda (html error)
+       (if error (funcall callback nil error)
+         (condition-case problem
+             (funcall callback (nndouban-source--group-discussions html) nil)
+           (error (funcall callback nil (error-message-string problem)))))))))
 
 (defun nndouban-source--group-csrf (group-id)
   "Return a current CSRF cookie for GROUP-ID without submitting a post."
@@ -860,8 +936,8 @@ only when the reader explicitly opens the full discussion."
   "Find or create one supported subscription kind in STORE."
   (or (nndouban--group store name)
       (progn
-        (unless (string-match "\\`\\(timeline\\|replies\\|topic\\)\\.\\([0-9]+\\)\\'" name)
-          (error "Use timeline.USER, replies.ACCOUNT or topic.ID"))
+        (unless (string-match "\\`\\(timeline\\|replies\\|group\\|topic\\)\\.\\([0-9]+\\)\\'" name)
+          (error "Use timeline.USER, replies.ACCOUNT, group.ID or topic.ID"))
         (let ((group (list :name name :kind (match-string 1 name) :user (match-string 2 name)
                            :next 1 :entries nil)))
           (push group (nndouban--db-groups store))
@@ -905,7 +981,8 @@ Return numbers of notification roots which received new direct replies."
              (record (or old (list :number (plist-get group :next) :message-id id
                                   :local-id nil :root nil :source nil :discussion-id nil
                                   :title nil :parent nil :author nil :author-id nil :time nil :body nil
-                                  :format nil :url nil :placeholder nil :targets nil :pending nil)))
+                                  :format nil :url nil :placeholder nil :activity nil
+                                  :targets nil :pending nil)))
              (parent (thread-reader-entry-parent-id item)))
         (unless old
           (setf (plist-get group :next) (1+ (plist-get group :next)))
@@ -915,6 +992,8 @@ Return numbers of notification roots which received new direct replies."
         ;; `plist-put' would otherwise prepend a new, unshared plist head.
         (unless (plist-member record :author-id)
           (nconc record (list :author-id nil)))
+        (unless (plist-member record :activity)
+          (nconc record (list :activity nil)))
         ;; Do not overwrite a fully fetched parent with a reference snapshot.
         (unless (and old (not (plist-get old :placeholder)) (thread-reader-entry-placeholder-p item))
           (dolist (pair (list (cons :local-id (thread-reader-entry-id item))
@@ -934,6 +1013,13 @@ Return numbers of notification roots which received new direct replies."
                              (cons :placeholder (and (thread-reader-entry-placeholder-p item) t))))
             (setf (plist-get record (car pair)) (cdr pair))))
         (when (equal id root-id) (setq root-record record))))
+    (when (and root-record (equal (plist-get group :kind) "group"))
+      (setf (plist-get root-record :activity)
+            (car (sort (delq nil
+                             (cons (plist-get root-record :activity)
+                                   (mapcar #'thread-reader-entry-time
+                                           (thread-reader-discussion-entries discussion))))
+                       #'string>))))
     (when direct
       (let ((targets (plist-get root-record :targets)))
         (maphash
@@ -949,7 +1035,7 @@ Return numbers of notification roots which received new direct replies."
 (defun nndouban--overview-p (entry group)
   "Whether ENTRY belongs in GROUP's one-row-per-discussion overview."
   (and (null (plist-get entry :parent))
-       (or (member (plist-get group :kind) '("timeline" "topic"))
+       (or (member (plist-get group :kind) '("timeline" "group" "topic"))
            (plist-get entry :targets))))
 
 (defun nndouban--header (entry group)
@@ -966,11 +1052,14 @@ Return numbers of notification roots which received new direct replies."
              (or (nndouban-source--user-id (plist-get entry :author-id)) "noreply")
              "@douban.invalid>")
      (nndouban--date
-      (if (and (null (plist-get entry :parent)) (equal (plist-get group :kind) "replies"))
-          (car (sort (cons (or (plist-get entry :time) "")
-                           (mapcar (lambda (id) (or (plist-get (nndouban--entry group id) :time) ""))
-                                   (plist-get root :targets))) #'string>))
-        (plist-get entry :time))) (plist-get entry :message-id)
+      (cond
+       ((and (null (plist-get entry :parent)) (equal (plist-get group :kind) "replies"))
+        (car (sort (cons (or (plist-get entry :time) "")
+                         (mapcar (lambda (id) (or (plist-get (nndouban--entry group id) :time) ""))
+                                 (plist-get root :targets))) #'string>)))
+       ((and (null (plist-get entry :parent)) (equal (plist-get group :kind) "group"))
+        (or (plist-get entry :activity) (plist-get entry :time)))
+       (t (plist-get entry :time)))) (plist-get entry :message-id)
      (or (plist-get entry :parent) "") 0 0 "" nil)))
 
 (deffoo nndouban-retrieve-headers (articles &optional group server _fetch-old)
@@ -1112,6 +1201,11 @@ Return numbers of notification roots which received new direct replies."
                       (plist-get data :user))
               (lambda (discussion error _direct)
                 (finish (when discussion (list (cons discussion nil))) error))))
+            ("group"
+             (nndouban-source-group
+              (plist-get data :user)
+              (lambda (discussions error)
+                (finish (mapcar #'list discussions) error))))
             (_ (nndouban-source-notifications (plist-get data :user) #'finish)))
         (error (finish nil (error-message-string problem)))))))
 
@@ -1156,6 +1250,12 @@ Return numbers of notification roots which received new direct replies."
     (user-error "Enter a https://www.douban.com/group/topic/ID/ URL"))
   (nndouban--subscribe
    (concat "topic." (thread-reader-douban--topic-id url))))
+
+;;;###autoload
+(defun nndouban-subscribe-group (id)
+  "Subscribe to the latest topic list of numeric Douban group ID."
+  (interactive "sDouban group ID: ")
+  (nndouban--subscribe (concat "group." (nndouban-source--group-id id))))
 
 (defvar-local nndouban--compose-group-id nil
   "Numeric Douban group for a new-topic Message buffer.")
@@ -1399,18 +1499,24 @@ for the existing asynchronous website adapter.  Never retry uncertain sends."
        (t (and result t))))))
 
 (deffoo nndouban-request-post (&optional server)
-  "Post a reply through Douban, never SMTP or NNTP."
+  "Post a reply or a new group topic through Douban, never SMTP or NNTP."
   (condition-case problem
       (let* ((store (nndouban--select server))
              (name (message-fetch-field "newsgroups"))
              (refs (split-string (or (message-fetch-field "references") "")))
              (group (and name (gnus-group-real-name name)))
-             (data (and group (nndouban--group store group)))
+             (data (and refs group (nndouban--group store group)))
              (parent (and data (nndouban--entry data (car (last refs))))))
-        (unless (and parent (not (plist-get parent :placeholder))
-                     (not (string-match-p "[,\r\n]" name)))
-          (error "Reply to a known Douban message; new topics and crossposting are unsupported"))
-        (nndouban--submit store data parent (nndouban--post-body)))
+        (when (or (null name) (string-match-p "[,\r\n]" name))
+          (error "Select exactly one Douban group"))
+        (cond
+         ((and (string-match "\\`group\\.\\([1-9][0-9]*\\)\\'" group)
+               (null refs))
+          (let ((nndouban--compose-group-id (match-string 1 group)))
+            (nndouban--send-group-topic)))
+         ((and parent (not (plist-get parent :placeholder)))
+          (nndouban--submit store data parent (nndouban--post-body)))
+         (t (error "Reply to a known Douban article or post to a group.ID"))))
     (error (nnheader-report 'nndouban "%s" (error-message-string problem)))))
 
 (defun nndouban-clear-uncertain-sends ()

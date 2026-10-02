@@ -3,6 +3,49 @@
 (require 'nndouban)
 (require 'gnus-thread-reader)
 
+(ert-deftest nndouban-test-group-listing-and-stable-topic-number ()
+  (let* ((html "<table class='olt'><tr class='th'><td>讨论</td></tr>
+<tr><td class='title'><a href='https://www.douban.com/group/topic/500120665/?x=1'
+title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
+<td><a href='https://www.douban.com/people/178926370/'>现实以下俱乐部</a></td>
+<td class='r-count'></td><td class='time'>2026-09-17 13:59</td></tr></table>")
+         (discussion (car (nndouban-source--group-discussions html)))
+         (root (car (thread-reader-discussion-entries discussion))))
+    (should (equal "500120665" (thread-reader-discussion-id discussion)))
+    (should (equal "现实以下俱乐部" (thread-reader-entry-author root)))
+    (should (equal "2026-09-17 13:59:00" (thread-reader-entry-time root)))
+    (should (thread-reader-entry-placeholder-p root))
+    (let* ((directory (make-temp-file "nndouban-group-test-" t))
+           (store (nndouban--load (expand-file-name "snapshot.json" directory))))
+      (unwind-protect
+          (let ((group (nndouban--ensure-group store "group.174786")))
+            (nndouban--import store group discussion)
+            (should (nndouban--overview-p (nndouban--entry group 1) group))
+            (setf (thread-reader-entry-placeholder-p root) nil
+                  (thread-reader-entry-time root) "2026-09-16 08:00:00"
+                  (thread-reader-entry-body root) "完整正文")
+            (nndouban--import store group discussion)
+            (should (= 1 (plist-get (nndouban--entry group 1) :number)))
+            (should (string-match-p
+                     "17 Sep 2026"
+                     (mail-header-date
+                      (nndouban--header (nndouban--entry group 1) group))))
+            (should (equal "完整正文" (plist-get (nndouban--entry group 1) :body))))
+        (delete-directory directory t)))))
+
+(ert-deftest nndouban-test-gnus-new-group-topic-dispatch ()
+  (let (target)
+    (cl-letf (((symbol-function 'nndouban--select) (lambda (&optional _) nil))
+              ((symbol-function 'message-fetch-field)
+               (lambda (field)
+                 (pcase field
+                   ("newsgroups" "group.174786")
+                   ("references" nil))))
+              ((symbol-function 'nndouban--send-group-topic)
+               (lambda (&optional _) (setq target nndouban--compose-group-id) t)))
+      (should (nndouban-request-post "douban"))
+      (should (equal "174786" target)))))
+
 (ert-deftest nndouban-test-timeline-title-exclusions ()
   (let ((nndouban-timeline-excluded-title-fragments
          '(("215524359" . ("想读:" "想听:" "听过:"))
