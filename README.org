@@ -1,6 +1,6 @@
 #+title: nndouban
 
-豆瓣的 Gnus 后端，复用 thread-reader 的连续回复树。独立安装，不依赖 Elfeed。
+豆瓣的 Gnus 后端，使用 gnus-thread-reader 的连续回复树。独立安装，不依赖 Elfeed。
 纯解析代码改编自 Dzming Li 的 elfeed-adapters-douban.el，保留 AGPL-3.0-or-later 许可。
 
 * 入口
@@ -27,8 +27,8 @@
 
 * 安装
 
-依赖 Emacs 29.1+、gnus-thread-reader、firefox-cookies 和 plz；豆瓣解析器已包含在本包中。
-沿用 ~thread-reader-douban-cookie-function~ 与 Firefox profile 配置，不另存 Cookie。
+依赖 Emacs 29.1+、gnus-thread-reader、firefox-cookies 和 plz；豆瓣解析器已合并在 ~nndouban.el~ 中。
+沿用 ~nndouban-cookie-function~ 与 Firefox profile 配置，不另存 Cookie。
 将本目录和依赖加入 load-path，执行：
 
 #+begin_src emacs-lisp
@@ -51,7 +51,7 @@ Gnus 列表每个讨论只占一行。按 ~RET~ 或 ~C-c C-t~ 载入完整讨论
 - 对回复按 ~d~ 只消除该回复的待读状态；对根文章按 ~d~ 消除整个通知的待读状态。
 - 列表的通知时间使用最近相关回应的时间。数量在下次更新列表时重绘。
 
-正文沿用 thread-reader 的缩进、分割线、粗体楼头和 mixed-pitch hook。
+正文沿用 gnus-thread-reader 的缩进、分割线、粗体楼头和 mixed-pitch hook。
 ~n/p~ 移动楼层，~TAB~ 折叠，~!~ 稍后读，~?~ dormant，~U~ 未读，~*~ 放入
 Gnus 原生缓存，~o~ 打开原生文章视图，~s~ 回到列表。读取或移动不会自动标已读。
 
