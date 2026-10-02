@@ -3,6 +3,23 @@
 (require 'nndouban)
 (require 'gnus-thread-reader)
 
+(ert-deftest nndouban-test-timeline-title-exclusions ()
+  (let ((nndouban-timeline-excluded-title-fragments
+         '(("215524359" . ("想读:" "想听:" "听过:"))
+           ("270309666" . ("想读:" "想听:")))))
+    (should-not (nndouban--timeline-include-p
+                 "215524359" (make-thread-reader-discussion
+                                :title "作者 想读: 《书》")))
+    (should-not (nndouban--timeline-include-p
+                 "215524359" (make-thread-reader-discussion
+                                :title "作者 听过: 《唱片》")))
+    (should (nndouban--timeline-include-p
+             "270309666" (make-thread-reader-discussion
+                            :title "作者 听过: 《唱片》")))
+    (should (nndouban--timeline-include-p
+             "200436317" (make-thread-reader-discussion
+                            :title "作者 想读: 《书》")))))
+
 (defun nndouban-test--discussion (&optional extra)
   (make-thread-reader-discussion
    :id "123" :url "https://www.douban.com/people/7/status/123/" :title "测试广播"

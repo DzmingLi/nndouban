@@ -32,6 +32,22 @@
 
 (defgroup nndouban nil "Douban in Gnus." :group 'gnus)
 
+(defcustom nndouban-timeline-excluded-title-fragments nil
+  "Alist of (USER-ID . FRAGMENTS) excluded from that user's timeline.
+Each fragment is matched literally within the discussion title."
+  :type '(alist :key-type string :value-type (repeat string))
+  :group 'nndouban)
+
+(defun nndouban--timeline-include-p (user discussion)
+  "Whether USER's DISCUSSION passes its configured title exclusions."
+  (let ((title (or (thread-reader-discussion-title discussion) "")))
+    (not (cl-some (lambda (fragment)
+                    (and (stringp fragment)
+                         (not (string-empty-p fragment))
+                         (string-match-p (regexp-quote fragment) title)))
+                  (alist-get user nndouban-timeline-excluded-title-fragments
+                             nil nil #'equal)))))
+
 (defcustom nndouban-source-page-size 20
   "Items requested per Douban page."
   :type 'natnum :group 'nndouban)
@@ -1082,7 +1098,14 @@ Return numbers of notification roots which received new direct replies."
             ("timeline"
              (nndouban-source-timeline
               (plist-get data :user)
-              (lambda (discussions error) (finish (mapcar #'list discussions) error))))
+              (lambda (discussions error)
+                (finish (mapcar #'list
+                                (cl-remove-if-not
+                                 (lambda (discussion)
+                                   (nndouban--timeline-include-p
+                                    (plist-get data :user) discussion))
+                                 discussions))
+                        error))))
             ("topic"
              (nndouban-source-discussion
               (format "https://www.douban.com/group/topic/%s/"
