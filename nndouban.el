@@ -30,9 +30,11 @@
 (require 'message)
 (require 'gnus-thread-reader)
 
+(defgroup nndouban nil "Douban in Gnus." :group 'gnus)
+
 (defcustom nndouban-source-page-size 20
   "Items requested per Douban page."
-  :type 'natnum :group 'thread-reader-douban)
+  :type 'natnum :group 'nndouban)
 
 (defun nndouban-source--group-id (id)
   "Validate numeric Douban group ID."
@@ -759,7 +761,6 @@ only when the reader explicitly opens the full discussion."
                (next)))))))))
 
 
-(defgroup nndouban nil "Douban in Gnus." :group 'gnus)
 (nnoo-declare nndouban)
 (defvoo nndouban-directory (expand-file-name "nndouban/" gnus-directory)
   "Directory for local article snapshots and stable number mappings.")
