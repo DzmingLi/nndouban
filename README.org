@@ -30,7 +30,6 @@
 (require 'nndouban)
 #+end_src
 
-本目录的 default.nix 可通过 callPackage 传入两个独立包构建。
 
 * 浏览和回应
 
