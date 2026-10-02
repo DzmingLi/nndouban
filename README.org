@@ -1,0 +1,85 @@
+#+title: nndouban
+
+豆瓣的 Gnus 后端，复用 thread-reader 的连续回复树。独立安装，不依赖 Elfeed。
+纯解析代码改编自 Dzming Li 的 elfeed-adapters-douban.el，保留 AGPL-3.0-or-later 许可。
+
+* 入口
+
+支持三类订阅：
+
+- ~M-x nndouban-subscribe-timeline~ ：输入某人的数字用户 ID。
+- ~M-x nndouban-subscribe-replies~ ：当前 Firefox 账号的“回应我的”。
+- ~M-x nndouban-subscribe-group-topic~ ：按豆瓣小组帖子 URL 订阅一篇帖子。
+
+内部组名分别为 ~timeline.USER~、~replies.ACCOUNT~ 和 ~topic.ID~ 。广播和个人话题是时间线
+里的内容类型；不单独创建“个人话题订阅”。书影音活动显示时间线卡片，打开后
+查看该广播下的评论，也支持已订阅小组帖的楼层与子回复。尚不支持书评、影评评论区。
+
+作者保留豆瓣数字用户 ID，昵称仅用于显示。Gnus 的 From 使用
+~昵称 <用户ID@douban.invalid>~ 区分作者；这是内部标识，不是真实邮箱。
+线程楼头只显示昵称，点击可打开对应用户主页。缺失 ID 的旧记录在重新抓取后补全，
+不根据昵称猜测身份。
+
+* 安装
+
+依赖 Emacs 29.1+、thread-reader-douban 和 gnus-thread-reader。
+沿用 ~thread-reader-douban-cookie-function~ 与 Firefox profile 配置，不另存 Cookie。
+将本目录和依赖加入 load-path，执行：
+
+#+begin_src emacs-lisp
+(require 'nndouban)
+#+end_src
+
+本目录的 default.nix 可通过 callPackage 传入两个独立包构建。
+
+* 浏览和回应
+
+Gnus 列表每个讨论只占一行。按 ~RET~ 或 ~C-c C-t~ 载入完整讨论，自动读取
+评论分页与子回复分页，在连续 Outline 树中呈现。~G~ 更新当前订阅。
+
+“回应我的”按讨论 ID 合并通知：
+
+- 同一篇文章的多个回应合成一行，标题显示待读回应数量。
+- 保存各回应的稳定 ID。重复获取同一条回应不会重新提醒。
+- 新回应加入原通知，并将该讨论重新标为未读。
+- 打开后定位到最早的待读回应；已经读完的通知定位到其历史回应。
+- ~N~ 跳到本次通知涉及的下一条未读回应，并展开其祖先。
+- 对回复按 ~d~ 只消除该回复的待读状态；对根文章按 ~d~ 消除整个通知的待读状态。
+- 列表的通知时间使用最近相关回应的时间。数量在下次更新列表时重绘。
+
+正文沿用 thread-reader 的缩进、分割线、粗体楼头和 mixed-pitch hook。
+~n/p~ 移动楼层，~TAB~ 折叠，~!~ 稍后读，~?~ dormant，~U~ 未读，~*~ 放入
+Gnus 原生缓存，~o~ 打开原生文章视图，~s~ 回到列表。读取或移动不会自动标已读。
+
+~r~ 在所选楼层使用 Gnus / message-mode 撰写跟帖，~C-u r~ 引用原文。
+发送走豆瓣 API；支持纯文本，不支持附件或跨组发送。小组新帖使用
+~M-x nndouban-new-group-topic~，输入小组数字 ID，随后在 Message 中填写标题和正文。
+超时或响应未确认
+时保留草稿并锁住同一提交，防止重复发布。只有在网站核实未发布后才使用
+~nndouban-clear-uncertain-sends~ 解锁。相同内容向同一楼的已确认提交不会再次发送。
+
+* 状态与范围
+
+Gnus 管理已读、ticked、dormant 和缓存。nndouban 在 ~nndouban-directory~ 保存
+文章快照、稳定编号、通知目标及提交结果，原子写入，文件权限 0600。~d~ 是本地
+阅读状态，不删除豆瓣内容。刷新保留旧快照，不复用编号。
+
+当前每次获取最新一页时间线和一页通知索引；已有内容保留，不保证补齐长时间离线
+期间越过索引页的更新。通知首次导入会把该讨论内识别到的历史直接回应纳入待读；
+之后按回应 ID 增量去重。通知识别包括对本人评论的回复，以及本人原帖下的顶层回应。
+
+评论区会完整分页抓取；任一页失败不以不完整结果覆盖旧讨论。订阅抓取异步执行，
+Gnus 获取正文只读本地快照。通用线程视图逐条调用 Gnus 同步读取接口。
+
+截至本次验证，实际时间线和广播评论读取成功；“回应我的”索引返回 HTTP 403，
+所以通知聚合、跳转、状态变化通过离线真实 Gnus 集成测试验证，尚未完成通知实网
+验证。小组发帖和回复提交通过离线模拟测试，没有向真实站点发布测试内容。
+
+* 测试
+
+从仓库目录执行（先安装并激活上述依赖）：
+
+#+begin_src sh
+emacs --batch --eval '(package-activate-all)' --eval '(setq load-prefer-newer t)' \
+  -L . -l tests/nndouban-test.el -f ert-run-tests-batch-and-exit
+#+end_src
