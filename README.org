@@ -27,7 +27,7 @@
 
 * 安装
 
-依赖 Emacs 29.1+、thread-reader-douban 和 gnus-thread-reader。
+依赖 Emacs 29.1+、gnus-thread-reader、firefox-cookies 和 plz；豆瓣解析器已包含在本包中。
 沿用 ~thread-reader-douban-cookie-function~ 与 Firefox profile 配置，不另存 Cookie。
 将本目录和依赖加入 load-path，执行：
 

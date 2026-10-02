@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Dzming Li
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (thread-reader-douban "0.1.0") (gnus-thread-reader "0.1.0"))
+;; Package-Requires: ((emacs "29.1") (gnus-thread-reader "0.1.0") (firefox-cookies "0.1.0") (plz "0.9.1"))
 ;; Keywords: news, comm
 ;; Pure HTML/status parsers adapted from Dzming Li's elfeed-adapters-douban.el.
 ;; No Elfeed runtime dependency.
