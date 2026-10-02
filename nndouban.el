@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026 Dzming Li
 ;; SPDX-License-Identifier: AGPL-3.0-or-later
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (gnus-thread-reader "0.1.0") (firefox-cookies "0.1.0") (plz "0.9.1"))
+;; Package-Requires: ((emacs "29.1") (firefox-cookies "0.1.0") (plz "0.9.1"))
 ;; Keywords: news, comm
 ;; Pure HTML/status parsers adapted from Dzming Li's elfeed-adapters-douban.el.
 ;; No Elfeed runtime dependency.
@@ -16,6 +16,9 @@
 ;; Fetching is asynchronous; Gnus article reads use the local snapshot only.
 
 ;;; Code:
+(require 'cl-lib)
+(require 'cl-generic)
+(require 'subr-x)
 (require 'seq)
 (require 'url)
 (require 'gnus)
@@ -27,12 +30,29 @@
 (require 'rfc2047)
 (require 'mail-parse)
 (require 'message)
-(require 'gnus-thread-reader)
 
 (defgroup nndouban nil "Douban in Gnus." :group 'gnus)
 
+;; Source records belong to the Gnus backend.  The optional
+;; gnus-thread-reader view sees only the resulting Gnus articles.
+(cl-defstruct nndouban-web-backend name)
+(cl-defstruct nndouban-web-entry
+  id parent-id (author "") (body "") (body-format 'plain) url time
+  children-cursor placeholder-p)
+(cl-defstruct nndouban-web-discussion
+  id url (title "Discussion") entries cursor)
+(cl-defstruct nndouban-web-page entries cursor)
+(cl-defstruct nndouban-web-send-error message uncertain)
+
+(cl-defgeneric nndouban-web-match-p (backend url))
+(cl-defgeneric nndouban-web-open (backend url callback))
+(cl-defgeneric nndouban-web-children
+    (backend discussion parent cursor callback))
+(cl-defgeneric nndouban-web-can-reply-p (backend discussion entry))
+(cl-defgeneric nndouban-web-reply
+    (backend discussion parent body callback))
+
 ;; Douban topic transport and reply parsing used by this Gnus backend.
-(require 'thread-reader)
 (require 'firefox-cookies)
 (require 'plz)
 (require 'json)
@@ -59,7 +79,7 @@ It must apply domain, path, expiry and container filtering for that URL."
 
 (defconst nndouban-topic--api "https://m.douban.com/rexxar/api/v2/group/topic/")
 
-(cl-defstruct (nndouban-topic-backend (:include thread-reader-backend)))
+(cl-defstruct (nndouban-topic-backend (:include nndouban-web-backend)))
 
 (defun nndouban-topic--text (node)
   "Return all text in DOM NODE on both Emacs 29 and newer versions."
@@ -119,7 +139,7 @@ It must apply domain, path, expiry and container filtering for that URL."
 (defun nndouban-topic--failure (text method &optional uncertain)
   "Make an error with TEXT for METHOD, marking UNCERTAIN submissions."
   (if (eq method 'post)
-      (make-thread-reader-send-error :message text :uncertain uncertain)
+      (make-nndouban-web-send-error :message text :uncertain uncertain)
     text))
 
 (defun nndouban-topic--http-error (failure method)
@@ -233,13 +253,13 @@ CALLBACK receives (BODY ERROR).  Never follow credential-bearing redirects."
          (time (car (dom-by-class meta "\\bcreate-time\\b"))))
     (unless (and body topic-id)
       (error "Douban topic content missing; check login, page access or a changed page layout"))
-    (make-thread-reader-discussion
+    (make-nndouban-web-discussion
      :id topic-id :url url
      :title (let ((text (and title (string-trim (nndouban-topic--text title)))))
               (if (or (null text) (string-empty-p text))
                   (concat "豆瓣话题 " topic-id) text))
      :entries
-     (list (make-thread-reader-entry
+     (list (make-nndouban-web-entry
             :id (concat "topic:" topic-id) :url url
             :author (if author (string-trim (nndouban-topic--text author)) "豆瓣用户")
             :time (and time (string-trim (nndouban-topic--text time)))
@@ -273,9 +293,9 @@ over reference snapshots, independent of response order."
   (let ((records (make-hash-table :test #'equal))
         (known (make-hash-table :test #'equal))
         (order nil)
-        (root (concat "topic:" (thread-reader-discussion-id discussion))))
-    (dolist (entry (thread-reader-discussion-entries discussion))
-      (puthash (thread-reader-entry-id entry) entry known))
+        (root (concat "topic:" (nndouban-web-discussion-id discussion))))
+    (dolist (entry (nndouban-web-discussion-entries discussion))
+      (puthash (nndouban-web-entry-id entry) entry known))
     (cl-labels
         ((collect (comment fallback partial)
            (let* ((remote (nndouban-topic--remote-id (plist-get comment :id)))
@@ -308,12 +328,12 @@ over reference snapshots, independent of response order."
           (unless (or (gethash parent known) (gethash parent records))
             (push parent missing))
           (unless (and partial old)
-            (push (make-thread-reader-entry
+            (push (make-nndouban-web-entry
                    :id id :parent-id parent :placeholder-p partial
                    :author (or (plist-get (plist-get comment :author) :name) "豆瓣用户")
                    :body (nndouban-topic--comment-body comment)
                    :time (plist-get comment :create_time)
-                   :url (concat (car (split-string (thread-reader-discussion-url discussion) "#"))
+                   :url (concat (car (split-string (nndouban-web-discussion-url discussion) "#"))
                                 "#comment_" remote)
                    :children-cursor
                    (when (and total
@@ -325,7 +345,7 @@ over reference snapshots, independent of response order."
                                    (or next (length (plist-get comment :replies)))))))
                   entries))))
       (dolist (id (delete-dups missing))
-        (push (make-thread-reader-entry
+        (push (make-nndouban-web-entry
                :id id :parent-id root :placeholder-p t
                :author "未加载的父回复" :body "[父回复尚未加载或已删除]")
               entries))
@@ -345,7 +365,7 @@ over reference snapshots, independent of response order."
       (error "Douban returned an unexpected comments page"))
     (when (and (< next total) (null comments))
       (error "Douban returned an empty page before the end of the discussion"))
-    (make-thread-reader-page
+    (make-nndouban-web-page
      :entries (nndouban-topic--entries
                comments discussion
                (when (eq kind 'replies)
@@ -354,11 +374,11 @@ over reference snapshots, independent of response order."
                (let ((cursor (copy-sequence cursor)))
                  (plist-put cursor :start next))))))
 
-(cl-defmethod thread-reader-backend-match-p
+(cl-defmethod nndouban-web-match-p
   ((_backend nndouban-topic-backend) url)
   (and (nndouban-topic--topic-id url) t))
 
-(cl-defmethod thread-reader-backend-open
+(cl-defmethod nndouban-web-open
   ((_backend nndouban-topic-backend) url callback)
   (unless (nndouban-topic--topic-id url) (error "Unsupported Douban topic URL"))
   ;; Retain query parameters: Douban can deny the bare URL of a shared topic.
@@ -375,10 +395,10 @@ over reference snapshots, independent of response order."
          ;; not make the successfully retrieved article disappear.
          (funcall callback discussion failure))))))
 
-(cl-defmethod thread-reader-backend-children
+(cl-defmethod nndouban-web-children
   ((_backend nndouban-topic-backend) discussion parent cursor callback)
-  (let* ((source (thread-reader-discussion-url discussion))
-         (topic (nndouban-topic--remote-id (thread-reader-discussion-id discussion)))
+  (let* ((source (nndouban-web-discussion-url discussion))
+         (topic (nndouban-topic--remote-id (nndouban-web-discussion-id discussion)))
          (kind (plist-get cursor :kind))
          (start (nndouban-topic--number (plist-get cursor :start)))
          (count (min 100 (max 1 nndouban-comment-page-size)))
@@ -389,7 +409,7 @@ over reference snapshots, independent of response order."
              (concat topic "/comments"))
             ('replies
              (let ((id (nndouban-topic--remote-id (plist-get cursor :comment-id))))
-               (unless (and parent (equal (thread-reader-entry-id parent) (concat "comment:" id)))
+               (unless (and parent (equal (nndouban-web-entry-id parent) (concat "comment:" id)))
                  (error "Reply cursor belongs to another entry"))
                (concat "comment/" id "/replies")))
             (_ (error "Unknown Douban pagination cursor")))))
@@ -405,20 +425,20 @@ over reference snapshots, independent of response order."
              (error (setq failure (error-message-string error))))
            (funcall callback page failure)))))))
 
-(cl-defmethod thread-reader-backend-can-reply-p
+(cl-defmethod nndouban-web-can-reply-p
   ((_backend nndouban-topic-backend) discussion entry)
-  (and (nndouban-topic--topic-id (thread-reader-discussion-url discussion))
-       (or (nndouban-topic--comment-id (thread-reader-entry-id entry))
-           (equal (thread-reader-entry-id entry)
-                  (concat "topic:" (thread-reader-discussion-id discussion))))))
+  (and (nndouban-topic--topic-id (nndouban-web-discussion-url discussion))
+       (or (nndouban-topic--comment-id (nndouban-web-entry-id entry))
+           (equal (nndouban-web-entry-id entry)
+                  (concat "topic:" (nndouban-web-discussion-id discussion))))))
 
-(cl-defmethod thread-reader-backend-reply
+(cl-defmethod nndouban-web-reply
   ((_backend nndouban-topic-backend) discussion parent body callback)
-  (let* ((source (thread-reader-discussion-url discussion))
-         (topic (nndouban-topic--remote-id (thread-reader-discussion-id discussion)))
+  (let* ((source (nndouban-web-discussion-url discussion))
+         (topic (nndouban-topic--remote-id (nndouban-web-discussion-id discussion)))
          (endpoint (concat nndouban-topic--api topic "/"))
-         (ref (nndouban-topic--comment-id (thread-reader-entry-id parent))))
-    (unless (or ref (equal (thread-reader-entry-id parent) (concat "topic:" topic)))
+         (ref (nndouban-topic--comment-id (nndouban-web-entry-id parent))))
+    (unless (or ref (equal (nndouban-web-entry-id parent) (concat "topic:" topic)))
       (error "Invalid Douban reply target"))
     ;; Permission checks are read-only and are repeated at submission time.
     (nndouban-topic--json
@@ -442,15 +462,15 @@ over reference snapshots, independent of response order."
                                         (plist-get payload :data) payload))
                            (id (nndouban-topic--remote-id (plist-get comment :id))))
                       (setq entry
-                            (make-thread-reader-entry
+                            (make-nndouban-web-entry
                              :id (concat "comment:" id)
-                             :parent-id (thread-reader-entry-id parent)
+                             :parent-id (nndouban-web-entry-id parent)
                              :author (or (plist-get (plist-get comment :author) :name) "我")
                              :time (plist-get comment :create_time)
                              :body (or (plist-get comment :text) body)
                              :url (concat source "#comment_" id))))
                   (error (setq failure
-                               (make-thread-reader-send-error
+                               (make-nndouban-web-send-error
                                 :message "Douban did not return a confirmed comment ID; check the website before retrying"
                                 :uncertain t))))
                 (funcall callback entry failure)))))))))))
@@ -464,7 +484,7 @@ Each fragment is matched literally within the discussion title."
 
 (defun nndouban--timeline-include-p (user discussion)
   "Whether USER's DISCUSSION passes its configured title exclusions."
-  (let ((title (or (thread-reader-discussion-title discussion) "")))
+  (let ((title (or (nndouban-web-discussion-title discussion) "")))
     (not (cl-some (lambda (fragment)
                     (and (stringp fragment)
                          (not (string-empty-p fragment))
@@ -566,7 +586,7 @@ Do not follow redirects with Cookie headers."
                (time (and time-cell (nndouban-source--group-time
                                      (dom-texts time-cell)))))
           (when (and (not (string-empty-p title)) time)
-            (push (make-thread-reader-discussion
+            (push (make-nndouban-web-discussion
                    :id id :url url :title title :cursor '(:kind comments :start 0)
                    :entries (list (make-nndouban-source-entry
                                    :id (concat "topic:" id) :author author
@@ -668,7 +688,7 @@ canonical group topic URL."
                           (setq url candidate)))
                     (error nil))
                   (unless url
-                    (setq failure (make-thread-reader-send-error
+                    (setq failure (make-nndouban-web-send-error
                                    :message "Douban did not confirm a group topic URL; check the website"
                                    :uncertain t)))
                   (funcall callback url failure)))
@@ -946,7 +966,7 @@ redirects are followed; never resend a POST after a redirect."
 (cl-defstruct (nndouban-source-backend (:include nndouban-topic-backend))
   account direct-ids root-author-id)
 
-(cl-defstruct (nndouban-source-entry (:include thread-reader-entry))
+(cl-defstruct (nndouban-source-entry (:include nndouban-web-entry))
   author-id)
 
 (defun nndouban-source--user-id (value)
@@ -957,12 +977,12 @@ redirects are followed; never resend a POST after a redirect."
 (defun nndouban-source--with-author (entry user-id)
   "Copy ENTRY with its numeric author USER-ID."
   (make-nndouban-source-entry
-   :id (thread-reader-entry-id entry) :parent-id (thread-reader-entry-parent-id entry)
-   :author (thread-reader-entry-author entry) :author-id (nndouban-source--user-id user-id)
-   :body (thread-reader-entry-body entry) :body-format (thread-reader-entry-body-format entry)
-   :url (thread-reader-entry-url entry) :time (thread-reader-entry-time entry)
-   :children-cursor (thread-reader-entry-children-cursor entry)
-   :placeholder-p (thread-reader-entry-placeholder-p entry)))
+   :id (nndouban-web-entry-id entry) :parent-id (nndouban-web-entry-parent-id entry)
+   :author (nndouban-web-entry-author entry) :author-id (nndouban-source--user-id user-id)
+   :body (nndouban-web-entry-body entry) :body-format (nndouban-web-entry-body-format entry)
+   :url (nndouban-web-entry-url entry) :time (nndouban-web-entry-time entry)
+   :children-cursor (nndouban-web-entry-children-cursor entry)
+   :placeholder-p (nndouban-web-entry-placeholder-p entry)))
 
 (defun nndouban-source--comment-authors (comments)
   "Index author IDs from COMMENTS, nested replies and referenced ancestors."
@@ -986,7 +1006,7 @@ redirects are followed; never resend a POST after a redirect."
                        (plist-get status :sharing_url))
                   (if user (format "https://www.douban.com/people/%s/status/%s/" user id)
                     (format "https://m.douban.com/status/%s/" id)))))
-    (make-thread-reader-discussion
+    (make-nndouban-web-discussion
      :id id :url url :title (nndouban-source--status-title status)
      :cursor '(:kind comments :start 0)
      :entries (list (make-nndouban-source-entry
@@ -995,7 +1015,7 @@ redirects are followed; never resend a POST after a redirect."
                      :time (plist-get status :create_time) :url url
                      :body-format 'html :body (nndouban-source--status-html status))))))
 
-(cl-defmethod thread-reader-backend-open ((backend nndouban-source-backend) url callback)
+(cl-defmethod nndouban-web-open ((backend nndouban-source-backend) url callback)
   (if (nndouban-topic--topic-id url)
       (funcall (if (nndouban-topic--group-topic-p url)
                    #'nndouban-source--group-page
@@ -1018,11 +1038,11 @@ redirects are followed; never resend a POST after a redirect."
                    (when (and href (string-match "/people/\\([0-9]+\\)/" href))
                      (setf (nndouban-source-backend-root-author-id backend) (match-string 1 href)))
                    (setq discussion (nndouban-topic--html html url))
-                   (setf (thread-reader-discussion-entries discussion)
+                   (setf (nndouban-web-discussion-entries discussion)
                          (mapcar (lambda (entry)
                                    (nndouban-source--with-author
                                     entry (nndouban-source-backend-root-author-id backend)))
-                                 (thread-reader-discussion-entries discussion))))
+                                 (nndouban-web-discussion-entries discussion))))
                (error (setq failure (error-message-string problem))))
              (funcall callback discussion failure)))))
     (let ((id (nndouban-source--status-id url)))
@@ -1038,16 +1058,16 @@ redirects are followed; never resend a POST after a redirect."
                                      (or (plist-get payload :status) payload)))
                    (setf (nndouban-source-backend-root-author-id backend)
                          (format "%s" (plist-get (plist-get (or (plist-get payload :status) payload) :author) :id)))
-                   (unless (equal id (thread-reader-discussion-id discussion))
+                   (unless (equal id (nndouban-web-discussion-id discussion))
                      (error "Douban returned another broadcast")))
                (error (setq failure (error-message-string problem))))
              (funcall callback discussion failure))))))))
 
-(cl-defmethod thread-reader-backend-children
+(cl-defmethod nndouban-web-children
   ((backend nndouban-source-backend) discussion parent cursor callback)
-  (let* ((source (thread-reader-discussion-url discussion))
+  (let* ((source (nndouban-web-discussion-url discussion))
          (topic (nndouban-topic--topic-id source))
-         (id (thread-reader-discussion-id discussion))
+         (id (nndouban-web-discussion-id discussion))
          (kind (plist-get cursor :kind))
          (start (plist-get cursor :start))
          (count (max 1 (min 100 nndouban-source-page-size)))
@@ -1059,7 +1079,7 @@ redirects are followed; never resend a POST after a redirect."
     (unless (and (integerp start) (>= start 0)
                  (or (and (eq kind 'comments) (null parent))
                      (and (eq kind 'replies) parent
-                          (equal (thread-reader-entry-id parent) (concat "comment:" comment)))))
+                          (equal (nndouban-web-entry-id parent) (concat "comment:" comment)))))
       (error "Invalid Douban comments cursor"))
     (funcall
      (if topic #'nndouban-topic--json #'nndouban-source--json)
@@ -1083,22 +1103,22 @@ redirects are followed; never resend a POST after a redirect."
                  (unless (plist-member normalized :count) (setq normalized (plist-put normalized :count count)))
                  (unless (plist-member normalized :total)
                    (error "Missing Douban comment total; cannot safely finish pagination"))
-                 (let ((context (copy-thread-reader-discussion discussion)))
+                 (let ((context (copy-nndouban-web-discussion discussion)))
                    (unless topic
-                     (setf (thread-reader-discussion-entries context)
-                           (cons (make-thread-reader-entry :id (concat "topic:" id))
-                                 (thread-reader-discussion-entries discussion))))
+                     (setf (nndouban-web-discussion-entries context)
+                           (cons (make-nndouban-web-entry :id (concat "topic:" id))
+                                 (nndouban-web-discussion-entries discussion))))
                    (setq page (nndouban-topic--page normalized context cursor)))
                  (let ((authors (nndouban-source--comment-authors comments)))
-                   (setf (thread-reader-page-entries page)
+                   (setf (nndouban-web-page-entries page)
                          (mapcar (lambda (entry)
                                    (nndouban-source--with-author
-                                    entry (gethash (thread-reader-entry-id entry) authors)))
-                                 (thread-reader-page-entries page))))
+                                    entry (gethash (nndouban-web-entry-id entry) authors)))
+                                 (nndouban-web-page-entries page))))
                  (unless topic
-                   (dolist (entry (thread-reader-page-entries page))
-                     (when (equal (thread-reader-entry-parent-id entry) (concat "topic:" id))
-                       (setf (thread-reader-entry-parent-id entry) (concat "status:" id)))))
+                   (dolist (entry (nndouban-web-page-entries page))
+                     (when (equal (nndouban-web-entry-parent-id entry) (concat "topic:" id))
+                       (setf (nndouban-web-entry-parent-id entry) (concat "status:" id)))))
                  (when (nndouban-source-backend-account backend)
                    (dolist (reply (nndouban-source--direct-replies
                                    (list :comments comments) (nndouban-source-backend-account backend)
@@ -1108,14 +1128,14 @@ redirects are followed; never resend a POST after a redirect."
              (error (setq failure (error-message-string problem))))
            (funcall callback page failure)))))))
 
-(cl-defmethod thread-reader-backend-reply
+(cl-defmethod nndouban-web-reply
   ((_backend nndouban-source-backend) discussion parent body callback)
-  (if (nndouban-topic--topic-id (thread-reader-discussion-url discussion))
+  (if (nndouban-topic--topic-id (nndouban-web-discussion-url discussion))
       (cl-call-next-method)
-    (let* ((source (thread-reader-discussion-url discussion))
+    (let* ((source (nndouban-web-discussion-url discussion))
            (id (nndouban-source--status-id source))
-           (ref (nndouban-topic--comment-id (thread-reader-entry-id parent))))
-      (unless (and id (or ref (equal (thread-reader-entry-id parent) (concat "status:" id))))
+           (ref (nndouban-topic--comment-id (nndouban-web-entry-id parent))))
+      (unless (and id (or ref (equal (nndouban-web-entry-id parent) (concat "status:" id))))
         (error "Invalid broadcast reply target"))
       (nndouban-source--json
        'post (format "https://m.douban.com/rexxar/api/v2/status/%s/create_comment" id) source
@@ -1127,13 +1147,13 @@ redirects are followed; never resend a POST after a redirect."
                  (let* ((comment (or (plist-get payload :comment) (plist-get payload :data) payload))
                         (remote (nndouban-topic--remote-id (plist-get comment :id))))
                    (setq entry (make-nndouban-source-entry
-                                :id (concat "comment:" remote) :parent-id (thread-reader-entry-id parent)
+                                :id (concat "comment:" remote) :parent-id (nndouban-web-entry-id parent)
                                 :author-id (nndouban-source--user-id (plist-get (plist-get comment :author) :id))
                                 :body (or (plist-get comment :text) body)
                                 :author (or (plist-get (plist-get comment :author) :name) "我")
                                 :time (plist-get comment :create_time)
                                 :url (concat source "#comment_" remote))))
-               (error (setq failure (make-thread-reader-send-error
+               (error (setq failure (make-nndouban-web-send-error
                                     :message "Douban did not confirm a comment ID; check the website"
                                     :uncertain t))))
              (funcall callback entry failure))))))))
@@ -1144,52 +1164,87 @@ CALLBACK receives (DISCUSSION ERROR DIRECT-IDS).  ACCOUNT optionally filters
 direct replies.  Incomplete fetches leave the backend's old cache intact."
   (let ((backend (make-nndouban-source-backend :name 'douban :account account
                                              :direct-ids (make-hash-table :test #'equal)))
-        (buffer (generate-new-buffer " *nndouban fetch*"))
+        (entries (make-hash-table :test #'equal))
+        order discussion
         (seen (make-hash-table :test #'equal)) done)
-    (with-current-buffer buffer (thread-reader-mode))
     (cl-labels
-        ((finish (discussion error)
+        ((finish (result error)
            (unless done
              (setq done t)
-             (when (buffer-live-p buffer) (kill-buffer buffer))
-             (funcall callback discussion error (nndouban-source-backend-direct-ids backend))))
+             (funcall callback result error (nndouban-source-backend-direct-ids backend))))
+         (merge (page-entries)
+           (unless (listp page-entries) (error "Douban returned invalid entries"))
+           (let ((page-ids (make-hash-table :test #'equal)))
+             (dolist (entry page-entries)
+               (let* ((id (and (nndouban-web-entry-p entry)
+                               (nndouban-web-entry-id entry)))
+                      (old (and id (gethash id entries))))
+                 (unless (and (stringp id) (not (string-empty-p id))
+                              (not (gethash id page-ids)))
+                   (error "Douban returned a duplicate or invalid entry ID"))
+                 (puthash id t page-ids)
+                 (when (and old
+                            (not (nndouban-web-entry-placeholder-p old))
+                            (not (equal (nndouban-web-entry-parent-id old)
+                                        (nndouban-web-entry-parent-id entry))))
+                   (error "Douban reply %s changed parents" id))
+                 (unless old (setq order (append order (list id))))
+                 (puthash id (copy-nndouban-web-entry entry) entries))))
+           (dolist (id order)
+             (let ((next id) (visiting (make-hash-table :test #'equal)))
+               (while next
+                 (when (gethash next visiting)
+                   (error "Douban reply cycle at %s" next))
+                 (puthash next t visiting)
+                 (let ((entry (gethash next entries)))
+                   (unless entry (error "Missing Douban reply parent: %s" next))
+                   (setq next (nndouban-web-entry-parent-id entry))))))
+           (setf (nndouban-web-discussion-entries discussion)
+                 (mapcar (lambda (id) (gethash id entries)) order)))
+         (next-page ()
+           (if (nndouban-web-discussion-cursor discussion)
+               (list nil)
+             (cl-loop for id in order
+                      when (nndouban-web-entry-children-cursor (gethash id entries))
+                      return (list id))))
          (step ()
            (unless done
              (condition-case problem
-                 (with-current-buffer buffer
-                   (setf (thread-reader-discussion-entries thread-reader--discussion)
-                         (mapcar (lambda (id) (gethash id thread-reader--entries)) thread-reader--order))
-                   (if-let* ((next (thread-reader--next-page)))
-                       (let* ((id (car next)) (parent (and id (gethash id thread-reader--entries)))
-                              (cursor (if parent (thread-reader-entry-children-cursor parent)
-                                        (thread-reader-discussion-cursor thread-reader--discussion)))
-                              (key (list id cursor)))
-                         (when (gethash key seen) (error "Douban repeated a pagination cursor"))
-                         (puthash key t seen)
-                         (thread-reader-backend-children
-                          backend thread-reader--discussion parent cursor
-                          (lambda (page error)
-                            (if error (finish nil error)
-                              (condition-case problem
-                                  (with-current-buffer buffer
-                                    (thread-reader--merge (thread-reader-page-entries page))
-                                    (if id (setf (thread-reader-entry-children-cursor (gethash id thread-reader--entries))
-                                                 (thread-reader-page-cursor page))
-                                      (setf (thread-reader-discussion-cursor thread-reader--discussion)
-                                            (thread-reader-page-cursor page)))
-                                    (run-at-time 0 nil #'step))
-                                (error (finish nil (error-message-string problem))))))))
-                     (finish thread-reader--discussion nil)))
+                  (if-let* ((next (next-page)))
+                      (let* ((id (car next))
+                             (parent (and id (gethash id entries)))
+                             (cursor (if parent (nndouban-web-entry-children-cursor parent)
+                                       (nndouban-web-discussion-cursor discussion)))
+                             (key (list id cursor)))
+                        (when (gethash key seen)
+                          (error "Douban repeated a pagination cursor"))
+                        (puthash key t seen)
+                        (nndouban-web-children
+                         backend discussion parent cursor
+                         (lambda (page error)
+                           (if error (finish nil error)
+                             (condition-case problem
+                                 (progn
+                                   (merge (nndouban-web-page-entries page))
+                                   (if id
+                                       (setf (nndouban-web-entry-children-cursor
+                                              (gethash id entries))
+                                             (nndouban-web-page-cursor page))
+                                     (setf (nndouban-web-discussion-cursor discussion)
+                                           (nndouban-web-page-cursor page)))
+                                   (run-at-time 0 nil #'step))
+                               (error (finish nil (error-message-string problem))))))))
+                    (finish discussion nil))
                (error (finish nil (error-message-string problem)))))))
       (condition-case problem
-          (thread-reader-backend-open
+          (nndouban-web-open
            backend url
-           (lambda (discussion error)
+           (lambda (result error)
              (if error (finish nil error)
                (condition-case problem
-                   (with-current-buffer buffer
-                     (setq thread-reader--discussion discussion)
-                     (thread-reader--merge (thread-reader-discussion-entries discussion) t)
+                   (progn
+                     (setq discussion result)
+                     (merge (nndouban-web-discussion-entries discussion))
                      (step))
                  (error (finish nil (error-message-string problem)))))))
         (error (finish nil (error-message-string problem)))))))
@@ -1221,11 +1276,11 @@ Older locally stored entries are retained by the Gnus backend."
                         (pcase-let ((`(,discussion . ,topic) (pop items)))
                           (if (not topic) (progn (push discussion discussions) (next))
                             ;; A failed enrichment must retain the canonical topic ID.
-                            (setf (thread-reader-discussion-id discussion) (nndouban-topic--topic-id topic)
-                                  (thread-reader-discussion-url discussion) topic
-                                  (thread-reader-entry-id (car (thread-reader-discussion-entries discussion)))
+                            (setf (nndouban-web-discussion-id discussion) (nndouban-topic--topic-id topic)
+                                  (nndouban-web-discussion-url discussion) topic
+                                  (nndouban-web-entry-id (car (nndouban-web-discussion-entries discussion)))
                                   (concat "topic:" (nndouban-topic--topic-id topic)))
-                            (thread-reader-backend-open
+                            (nndouban-web-open
                              (make-nndouban-source-backend :name 'douban) topic
                              (lambda (full _error)
                                (push (or full discussion) discussions)
@@ -1377,8 +1432,8 @@ only when the reader explicitly opens the full discussion."
 (defun nndouban--message-id (discussion id)
   "Make a stable Message-ID for ID within DISCUSSION."
   (format "<%s.%s.%s@douban.invalid>"
-          (if (nndouban-topic--topic-id (thread-reader-discussion-url discussion)) "topic" "status")
-          (thread-reader-discussion-id discussion) (replace-regexp-in-string ":" "." id)))
+          (if (nndouban-topic--topic-id (nndouban-web-discussion-url discussion)) "topic" "status")
+          (nndouban-web-discussion-id discussion) (replace-regexp-in-string ":" "." id)))
 
 (defun nndouban--line (text)
   "Make remote TEXT safe for a single header field."
@@ -1395,19 +1450,19 @@ only when the reader explicitly opens the full discussion."
   "Merge DISCUSSION into GROUP, optionally aggregating DIRECT notification IDs.
 Return numbers of notification roots which received new direct replies."
   (let* ((entries (plist-get group :entries))
-         (root (cl-find-if (lambda (e) (null (thread-reader-entry-parent-id e)))
-                          (thread-reader-discussion-entries discussion)))
-         (root-id (nndouban--message-id discussion (thread-reader-entry-id root)))
+         (root (cl-find-if (lambda (e) (null (nndouban-web-entry-parent-id e)))
+                          (nndouban-web-discussion-entries discussion)))
+         (root-id (nndouban--message-id discussion (nndouban-web-entry-id root)))
          root-record new-targets)
-    (dolist (item (thread-reader-discussion-entries discussion))
-      (let* ((id (nndouban--message-id discussion (thread-reader-entry-id item)))
+    (dolist (item (nndouban-web-discussion-entries discussion))
+      (let* ((id (nndouban--message-id discussion (nndouban-web-entry-id item)))
              (old (nndouban--entry group id))
              (record (or old (list :number (plist-get group :next) :message-id id
                                   :local-id nil :root nil :source nil :discussion-id nil
                                   :title nil :parent nil :author nil :author-id nil :time nil :body nil
                                   :format nil :url nil :placeholder nil :activity nil
                                   :targets nil :pending nil)))
-             (parent (thread-reader-entry-parent-id item)))
+             (parent (nndouban-web-entry-parent-id item)))
         (unless old
           (setf (plist-get group :next) (1+ (plist-get group :next)))
           (push record entries)
@@ -1419,30 +1474,30 @@ Return numbers of notification roots which received new direct replies."
         (unless (plist-member record :activity)
           (nconc record (list :activity nil)))
         ;; Do not overwrite a fully fetched parent with a reference snapshot.
-        (unless (and old (not (plist-get old :placeholder)) (thread-reader-entry-placeholder-p item))
-          (dolist (pair (list (cons :local-id (thread-reader-entry-id item))
-                             (cons :root root-id) (cons :source (thread-reader-discussion-url discussion))
-                             (cons :discussion-id (thread-reader-discussion-id discussion))
-                             (cons :title (thread-reader-discussion-title discussion))
+        (unless (and old (not (plist-get old :placeholder)) (nndouban-web-entry-placeholder-p item))
+          (dolist (pair (list (cons :local-id (nndouban-web-entry-id item))
+                             (cons :root root-id) (cons :source (nndouban-web-discussion-url discussion))
+                             (cons :discussion-id (nndouban-web-discussion-id discussion))
+                             (cons :title (nndouban-web-discussion-title discussion))
                              (cons :parent (and parent (nndouban--message-id discussion parent)))
-                             (cons :author (thread-reader-entry-author item))
+                             (cons :author (nndouban-web-entry-author item))
                              (cons :author-id
                                    (or (and (nndouban-source-entry-p item)
                                             (nndouban-source-entry-author-id item))
                                        (plist-get record :author-id)))
-                             (cons :time (thread-reader-entry-time item))
-                             (cons :body (thread-reader-entry-body item))
-                             (cons :format (symbol-name (thread-reader-entry-body-format item)))
-                             (cons :url (thread-reader-entry-url item))
-                             (cons :placeholder (and (thread-reader-entry-placeholder-p item) t))))
+                             (cons :time (nndouban-web-entry-time item))
+                             (cons :body (nndouban-web-entry-body item))
+                             (cons :format (symbol-name (nndouban-web-entry-body-format item)))
+                             (cons :url (nndouban-web-entry-url item))
+                             (cons :placeholder (and (nndouban-web-entry-placeholder-p item) t))))
             (setf (plist-get record (car pair)) (cdr pair))))
         (when (equal id root-id) (setq root-record record))))
     (when (and root-record (equal (plist-get group :kind) "group"))
       (setf (plist-get root-record :activity)
             (car (sort (delq nil
                              (cons (plist-get root-record :activity)
-                                   (mapcar #'thread-reader-entry-time
-                                           (thread-reader-discussion-entries discussion))))
+                                   (mapcar #'nndouban-web-entry-time
+                                           (nndouban-web-discussion-entries discussion))))
                        #'string>))))
     (when direct
       (let ((targets (plist-get root-record :targets)))
@@ -1727,8 +1782,8 @@ draft open."
              (unless done
                (setq done t published url failure error)
                (if error
-                   (unless (and (thread-reader-send-error-p error)
-                                (thread-reader-send-error-uncertain error))
+                   (unless (and (nndouban-web-send-error-p error)
+                                (nndouban-web-send-error-uncertain error))
                      (setf (plist-get attempt :state) "failed"))
                  (setf (plist-get attempt :state) "sent"
                        (plist-get attempt :url) url))
@@ -1740,8 +1795,8 @@ draft open."
           (accept-process-output nil 0.05)))
       (cond
        ((not done) (error "Send timed out; draft retained and submission locked"))
-       (failure (error "%s" (if (thread-reader-send-error-p failure)
-                                (thread-reader-send-error-message failure) failure)))
+       (failure (error "%s" (if (nndouban-web-send-error-p failure)
+                                (nndouban-web-send-error-message failure) failure)))
        (published (message "Published Douban group topic: %s" published) t)
        (t (error "Douban did not confirm the new topic"))))))
 
@@ -1811,6 +1866,7 @@ draft open."
 
 (declare-function gnus-thread-reader-open "gnus-thread-reader" ())
 (declare-function gnus-thread-reader--reveal "gnus-thread-reader" (id))
+(defvar gnus-thread-reader-focus-ids)
 
 (defun nndouban-refresh ()
   "Update the current Douban subscription, then refresh its Gnus overview."
@@ -1880,7 +1936,7 @@ for the existing asynchronous website adapter.  Never retry uncertain sends."
                             :test #'equal :key (lambda (p) (plist-get p :fingerprint))))
          (attempt (or previous (list :fingerprint fingerprint :state "pending")))
          (root (nndouban--entry data (plist-get parent :root)))
-         (discussion (make-thread-reader-discussion
+         (discussion (make-nndouban-web-discussion
                       :id (plist-get parent :discussion-id) :url (plist-get parent :source)
                       :title (plist-get parent :title) :entries (list (nndouban--thread-entry root))))
          done result failure)
@@ -1892,18 +1948,18 @@ for the existing asynchronous website adapter.  Never retry uncertain sends."
       ;; Write before issuing the POST so Emacs restart cannot silently retry it.
       (nndouban--save store)
       (condition-case problem
-          (thread-reader-backend-reply
+          (nndouban-web-reply
            (make-nndouban-source-backend :name 'douban) discussion
            (nndouban--thread-entry parent) body
            (lambda (entry error)
              (unless done
                (setq done t failure error result entry)
                (if error
-                   (unless (and (thread-reader-send-error-p error)
-                                (thread-reader-send-error-uncertain error))
+                   (unless (and (nndouban-web-send-error-p error)
+                                (nndouban-web-send-error-uncertain error))
                      (setf (plist-get attempt :state) "failed"))
                  (setf (plist-get attempt :state) "sent")
-                 (setf (thread-reader-discussion-entries discussion)
+                 (setf (nndouban-web-discussion-entries discussion)
                        (list (nndouban--thread-entry root) entry))
                  (condition-case problem
                      (nndouban--import store data discussion)
@@ -1918,8 +1974,8 @@ for the existing asynchronous website adapter.  Never retry uncertain sends."
           (accept-process-output nil 0.05)))
       (cond
        ((not done) (error "Send timed out; the draft is retained and this submission is locked"))
-       (failure (error "%s" (if (thread-reader-send-error-p failure)
-                                (thread-reader-send-error-message failure) failure)))
+       (failure (error "%s" (if (nndouban-web-send-error-p failure)
+                                (nndouban-web-send-error-message failure) failure)))
        (t (and result t))))))
 
 (deffoo nndouban-request-post (&optional server)

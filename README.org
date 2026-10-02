@@ -27,7 +27,8 @@
 
 * 安装
 
-依赖 Emacs 29.1+、gnus-thread-reader、firefox-cookies 和 plz；豆瓣解析器已合并在 ~nndouban.el~ 中。
+依赖 Emacs 29.1+、firefox-cookies 和 plz；豆瓣解析器已合并在 ~nndouban.el~ 中。
+~gnus-thread-reader~ 只用于可选的连续阅读视图，后端抓取和 Gnus 文章不依赖它。
 沿用 ~nndouban-cookie-function~ 与 Firefox profile 配置，不另存 Cookie。
 将本目录和依赖加入 load-path，执行：
 

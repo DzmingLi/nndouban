@@ -10,20 +10,20 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
 <td><a href='https://www.douban.com/people/178926370/'>现实以下俱乐部</a></td>
 <td class='r-count'></td><td class='time'>2026-09-17 13:59</td></tr></table>")
          (discussion (car (nndouban-source--group-discussions html)))
-         (root (car (thread-reader-discussion-entries discussion))))
-    (should (equal "500120665" (thread-reader-discussion-id discussion)))
-    (should (equal "现实以下俱乐部" (thread-reader-entry-author root)))
-    (should (equal "2026-09-17 13:59:00" (thread-reader-entry-time root)))
-    (should (thread-reader-entry-placeholder-p root))
+         (root (car (nndouban-web-discussion-entries discussion))))
+    (should (equal "500120665" (nndouban-web-discussion-id discussion)))
+    (should (equal "现实以下俱乐部" (nndouban-web-entry-author root)))
+    (should (equal "2026-09-17 13:59:00" (nndouban-web-entry-time root)))
+    (should (nndouban-web-entry-placeholder-p root))
     (let* ((directory (make-temp-file "nndouban-group-test-" t))
            (store (nndouban--load (expand-file-name "snapshot.json" directory))))
       (unwind-protect
           (let ((group (nndouban--ensure-group store "group.174786")))
             (nndouban--import store group discussion)
             (should (nndouban--overview-p (nndouban--entry group 1) group))
-            (setf (thread-reader-entry-placeholder-p root) nil
-                  (thread-reader-entry-time root) "2026-09-16 08:00:00"
-                  (thread-reader-entry-body root) "完整正文")
+            (setf (nndouban-web-entry-placeholder-p root) nil
+                  (nndouban-web-entry-time root) "2026-09-16 08:00:00"
+                  (nndouban-web-entry-body root) "完整正文")
             (nndouban--import store group discussion)
             (should (= 1 (plist-get (nndouban--entry group 1) :number)))
             (should (string-match-p
@@ -51,32 +51,32 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
          '(("215524359" . ("想读:" "想听:" "听过:"))
            ("270309666" . ("想读:" "想听:")))))
     (should-not (nndouban--timeline-include-p
-                 "215524359" (make-thread-reader-discussion
+                 "215524359" (make-nndouban-web-discussion
                                 :title "作者 想读: 《书》")))
     (should-not (nndouban--timeline-include-p
-                 "215524359" (make-thread-reader-discussion
+                 "215524359" (make-nndouban-web-discussion
                                 :title "作者 听过: 《唱片》")))
     (should (nndouban--timeline-include-p
-             "270309666" (make-thread-reader-discussion
+             "270309666" (make-nndouban-web-discussion
                             :title "作者 听过: 《唱片》")))
     (should (nndouban--timeline-include-p
-             "200436317" (make-thread-reader-discussion
+             "200436317" (make-nndouban-web-discussion
                             :title "作者 想读: 《书》")))))
 
 (defun nndouban-test--discussion (&optional extra)
-  (make-thread-reader-discussion
+  (make-nndouban-web-discussion
    :id "123" :url "https://www.douban.com/people/7/status/123/" :title "测试广播"
    :entries
    (append
-    (list (make-thread-reader-entry :id "status:123" :author "作者" :time "2026-10-02 08:00:00"
+    (list (make-nndouban-web-entry :id "status:123" :author "作者" :time "2026-10-02 08:00:00"
                                     :body "主帖正文")
-          (make-thread-reader-entry :id "comment:1" :parent-id "status:123" :author "我"
+          (make-nndouban-web-entry :id "comment:1" :parent-id "status:123" :author "我"
                                     :time "2026-10-02 08:10:00" :body "我的原评论")
-          (make-thread-reader-entry :id "comment:2" :parent-id "comment:1" :author "对方"
+          (make-nndouban-web-entry :id "comment:2" :parent-id "comment:1" :author "对方"
                                     :time "2026-10-02 08:20:00" :body "第一条回应")
-          (make-thread-reader-entry :id "comment:3" :parent-id "comment:1" :author "对方"
+          (make-nndouban-web-entry :id "comment:3" :parent-id "comment:1" :author "对方"
                                     :time "2026-10-02 08:30:00" :body "第二条回应"))
-    (when extra (list (make-thread-reader-entry :id "comment:4" :parent-id "comment:2"
+    (when extra (list (make-nndouban-web-entry :id "comment:4" :parent-id "comment:2"
                                                :author "对方" :time "2026-10-02 08:40:00"
                                                :body "新的回应"))))))
 
@@ -138,7 +138,7 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
 (ert-deftest nndouban-test-header-injection-and-source-boundaries ()
   (nndouban-test--store
     (let ((discussion (nndouban-test--discussion)))
-      (setf (thread-reader-discussion-title discussion) "Title\nBcc: victim@example.org")
+      (setf (nndouban-web-discussion-title discussion) "Title\nBcc: victim@example.org")
       (nndouban--import store group discussion)
       (should-not (string-match-p "[\n\r]" (mail-header-subject (nndouban--header (nndouban--entry group 1) group)))))
     (should (equal (plist-get (nndouban--ensure-group store "topic.123") :kind)
@@ -170,29 +170,64 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
                  (funcall callback '(:total 2 :comments ((:id 9 :text "hi" :author (:id "7" :name "other")
                                                          :ref_comment (:id 1 :author (:id "42"))))) nil))))
       (let ((nndouban-source-page-size 1))
-        (thread-reader-backend-children backend discussion nil '(:kind comments :start 0)
+        (nndouban-web-children backend discussion nil '(:kind comments :start 0)
                                         (lambda (page error) (setq result page failure error)))))
     (should-not failure)
-    (should (= 1 (plist-get (thread-reader-page-cursor result) :start)))
+    (should (= 1 (plist-get (nndouban-web-page-cursor result) :start)))
     (should (gethash "comment:9" (nndouban-source-backend-direct-ids backend)))))
+
+(ert-deftest nndouban-test-fetches-all-pages-without-reader-state ()
+  (let (result failure pages)
+    (cl-letf (((symbol-function 'nndouban-web-open)
+               (lambda (_backend _url callback)
+                 (funcall callback
+                          (make-nndouban-web-discussion
+                           :id "123" :url "https://www.douban.com/topic/123/"
+                           :entries (list (make-nndouban-web-entry :id "topic:123"))
+                           :cursor '(:start 0))
+                          nil)))
+              ((symbol-function 'nndouban-web-children)
+               (lambda (_backend _discussion _parent cursor callback)
+                 (push (plist-get cursor :start) pages)
+                 (let ((start (plist-get cursor :start)))
+                   (funcall callback
+                            (make-nndouban-web-page
+                             :entries (list (make-nndouban-web-entry
+                                             :id (format "comment:%d" (1+ start))
+                                             :parent-id "topic:123"))
+                             :cursor (when (zerop start) '(:start 1)))
+                            nil)))))
+      (nndouban-source-discussion
+       "https://www.douban.com/topic/123/"
+       (lambda (discussion error _direct)
+         (setq result discussion failure error)))
+      (let ((deadline (+ (float-time) 1)))
+        (while (and (not result) (not failure) (< (float-time) deadline))
+          (accept-process-output nil 0.01))))
+    (should-not failure)
+    (should result)
+    (should (equal (nreverse pages) '(0 1)))
+    (should (equal (mapcar #'nndouban-web-entry-id
+                           (nndouban-web-discussion-entries result))
+                   '("topic:123" "comment:1" "comment:2")))))
 
 (ert-deftest nndouban-test-send-confirmation-and-uncertain-deduplication ()
   (nndouban-test--store
     (nndouban--import store group (nndouban-test--discussion))
     (let ((calls 0))
-      (cl-letf (((symbol-function 'thread-reader-backend-reply)
+      (cl-letf (((symbol-function 'nndouban-web-reply)
                  (lambda (_backend _discussion parent body callback)
                    (cl-incf calls)
-                   (should (equal (thread-reader-entry-id parent) "comment:2"))
-                   (funcall callback (make-thread-reader-entry :id "comment:20" :parent-id "comment:2"
+                   (should (equal (nndouban-web-entry-id parent) "comment:2"))
+                   (funcall callback (make-nndouban-web-entry :id "comment:20" :parent-id "comment:2"
                                                                :author "me" :body body) nil))))
         (should (nndouban--submit store group (nndouban--entry group 3) "reply"))
         (should (nndouban--submit store group (nndouban--entry group 3) "reply"))
         (should (= calls 1)))
-      (cl-letf (((symbol-function 'thread-reader-backend-reply)
+      (cl-letf (((symbol-function 'nndouban-web-reply)
                  (lambda (_backend _discussion _parent _body callback)
                    (cl-incf calls)
-                   (funcall callback nil (make-thread-reader-send-error :message "timeout" :uncertain t)))))
+                   (funcall callback nil (make-nndouban-web-send-error :message "timeout" :uncertain t)))))
         (should-error (nndouban--submit store group (nndouban--entry group 3) "uncertain"))
         (should-error (nndouban--submit (nndouban--load (nndouban--db-file store)) group
                                        (nndouban--entry group 3) "uncertain"))
@@ -332,18 +367,18 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
 
 (ert-deftest nndouban-test-broadcast-empty-parent-schema ()
   (let* ((backend (make-nndouban-source-backend :name 'douban))
-         (discussion (make-thread-reader-discussion
+         (discussion (make-nndouban-web-discussion
                       :id "123" :url "https://www.douban.com/people/7/status/123/"
-                      :entries (list (make-thread-reader-entry :id "status:123")))) page failure)
+                      :entries (list (make-nndouban-web-entry :id "status:123")))) page failure)
     (cl-letf (((symbol-function 'nndouban-source--json)
                (lambda (_method _url _source _params callback)
                  (funcall callback '(:total 1 :start 0 :count 20 :comments
                                             ((:id 456 :text "reply" :parent_comment_id ""))) nil))))
-      (thread-reader-backend-children backend discussion nil '(:kind comments :start 0)
+      (nndouban-web-children backend discussion nil '(:kind comments :start 0)
                                       (lambda (value error) (setq page value failure error)))
       (should-not failure)
-      (should (= 1 (length (thread-reader-page-entries page))))
-      (should (equal "status:123" (thread-reader-entry-parent-id (car (thread-reader-page-entries page))))))))
+      (should (= 1 (length (nndouban-web-page-entries page))))
+      (should (equal "status:123" (nndouban-web-entry-parent-id (car (nndouban-web-page-entries page))))))))
 
 (ert-deftest nndouban-test-mime-alternative-and-attachment ()
   (with-temp-buffer
@@ -362,14 +397,14 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
   (nndouban-test--store
     (let* ((discussion (nndouban-source--status-discussion
                         '(:id "123" :author (:id "281084685" :name "原昵称") :text "body")))
-           (root (car (thread-reader-discussion-entries discussion))))
+           (root (car (nndouban-web-discussion-entries discussion))))
       (should (equal "281084685" (nndouban-source-entry-author-id root)))
       (nndouban--import store group discussion)
       (setf (plist-get group :entries)
             (mapcar (lambda (entry)
                       (let ((old (copy-sequence entry))) (cl-remf old :author-id) old))
                     (plist-get group :entries)))
-      (setf (thread-reader-entry-author root) "新昵称")
+      (setf (nndouban-web-entry-author root) "新昵称")
       (nndouban--import store group discussion)
       (let* ((reloaded (nndouban--load (nndouban--db-file store)))
              (data (nndouban--group reloaded "replies.42"))
