@@ -87,6 +87,23 @@ It must apply domain, path, expiry and container filtering for that URL."
       (dom-inner-text node)
     (with-no-warnings (dom-texts node))))
 
+(defun nndouban-topic--summary-text (node)
+  "Extract NODE's text, separating block elements for a short summary."
+  (if (stringp node) node
+    (concat (mapconcat #'nndouban-topic--summary-text
+                       (dom-children node) "")
+            (if (memq (dom-tag node) '(p div li br)) " " ""))))
+
+(defun nndouban-topic--summary (body id)
+  "Use the opening text of BODY as a title, falling back to topic ID."
+  (let ((text (string-trim
+               (replace-regexp-in-string
+                "[[:space:][:cntrl:]]+" " "
+                (nndouban-topic--summary-text body)))))
+    (if (string-empty-p text)
+        (concat "豆瓣话题 " id)
+      (truncate-string-to-width text 80 nil nil "…"))))
+
 (defun nndouban-topic--topic-id (url)
   "Return the personal or group topic ID in URL, or nil."
   (when (and (stringp url)
@@ -257,7 +274,7 @@ CALLBACK receives (BODY ERROR).  Never follow credential-bearing redirects."
      :id topic-id :url url
      :title (let ((text (and title (string-trim (nndouban-topic--text title)))))
               (if (or (null text) (string-empty-p text))
-                  (concat "豆瓣话题 " topic-id) text))
+                  (nndouban-topic--summary body topic-id) text))
      :entries
      (list (make-nndouban-web-entry
             :id (concat "topic:" topic-id) :url url
@@ -1521,8 +1538,23 @@ Return numbers of notification roots which received new direct replies."
   "Create a Gnus mail header for ENTRY in GROUP."
   (let* ((root (nndouban--entry group (plist-get entry :root)))
          (pending (length (plist-get root :pending)))
+         (stored-title (plist-get entry :title))
+         (display-title
+          (if (and (null (plist-get entry :parent))
+                   (stringp stored-title)
+                   (string-match-p "\\`豆瓣话题 [0-9]+\\'" stored-title)
+                   (equal (plist-get entry :format) "html")
+                   (stringp (plist-get entry :body)))
+              (condition-case nil
+                  (with-temp-buffer
+                    (insert (plist-get entry :body))
+                    (nndouban-topic--summary
+                     (libxml-parse-html-region (point-min) (point-max))
+                     (plist-get entry :discussion-id)))
+                (error stored-title))
+            stored-title))
          (title (concat (unless (null (plist-get entry :parent)) "Re: ")
-                        (nndouban--line (plist-get entry :title))
+                        (nndouban--line display-title)
                         (when (and (null (plist-get entry :parent)) (> pending 0))
                           (format " [%d 条新回应]" pending)))))
     (make-full-mail-header
