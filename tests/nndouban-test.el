@@ -84,6 +84,21 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
              "200436317" (make-nndouban-web-discussion
                             :title "作者 想读: 《书》")))))
 
+(ert-deftest nndouban-test-timeline-group-exclusions-take-precedence ()
+  (let ((nndouban-timeline-excluded-title-fragments
+         '(("215524359" . ("想读:")))))
+    (cl-letf (((symbol-function 'gnus-group-get-parameter)
+               (lambda (group parameter &optional _)
+                 (when (and (equal group "nndouban:timeline.215524359")
+                            (eq parameter 'nndouban-excluded-title-fragments))
+                   '("听过:")))))
+      (should-not (nndouban--timeline-include-p
+                   "215524359" (make-nndouban-web-discussion
+                                  :title "作者 听过: 《唱片》")))
+      (should (nndouban--timeline-include-p
+               "215524359" (make-nndouban-web-discussion
+                              :title "作者 想读: 《书》"))))))
+
 (defun nndouban-test--discussion (&optional extra)
   (make-nndouban-web-discussion
    :id "123" :url "https://www.douban.com/people/7/status/123/" :title "测试广播"

@@ -17,8 +17,10 @@
 查看该广播下的评论，也支持小组帖的楼层与子回复。小组订阅抓取最近一页的
 帖子索引，保留以前抓取的帖子；打开帖子时再获取正文和完整回复。
 尚不支持书评、影评评论区。
-~nndouban-timeline-excluded-title-fragments~ 可按用户 ID 排除标题中的指定字串，
-便于从旧 Elfeed 订阅迁移时保留原有过滤规则。
+时间线标题过滤保存在各 Gnus 组的 ~nndouban-excluded-title-fragments~ 参数中，
+例如 ~nndouban:timeline.57109319~ 可设置为 ~("想读:")~ 。后端按这些字串
+过滤该组的标题；也可用全局选项 ~nndouban-timeline-excluded-title-fragments~
+提供默认值。
 
 作者保留豆瓣数字用户 ID，昵称仅用于显示。Gnus 的 From 使用
 ~昵称 <用户ID@douban.invalid>~ 区分作者；这是内部标识，不是真实邮箱。

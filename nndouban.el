@@ -495,19 +495,26 @@ over reference snapshots, independent of response order."
 
 (defcustom nndouban-timeline-excluded-title-fragments nil
   "Alist of (USER-ID . FRAGMENTS) excluded from that user's timeline.
-Each fragment is matched literally within the discussion title."
+Each fragment is matched literally within the discussion title.
+A timeline group's `nndouban-excluded-title-fragments' parameter takes
+precedence, so per-group filters can live in Gnus's native state."
   :type '(alist :key-type string :value-type (repeat string))
   :group 'nndouban)
 
 (defun nndouban--timeline-include-p (user discussion)
   "Whether USER's DISCUSSION passes its configured title exclusions."
-  (let ((title (or (nndouban-web-discussion-title discussion) "")))
+  (let* ((title (or (nndouban-web-discussion-title discussion) ""))
+         (group (format "nndouban:timeline.%s" user))
+         (fragments
+          (or (gnus-group-get-parameter
+               group 'nndouban-excluded-title-fragments t)
+              (alist-get user nndouban-timeline-excluded-title-fragments
+                         nil nil #'equal))))
     (not (cl-some (lambda (fragment)
                     (and (stringp fragment)
                          (not (string-empty-p fragment))
                          (string-match-p (regexp-quote fragment) title)))
-                  (alist-get user nndouban-timeline-excluded-title-fragments
-                             nil nil #'equal)))))
+                  fragments))))
 
 (defcustom nndouban-source-page-size 20
   "Items requested per Douban page."
