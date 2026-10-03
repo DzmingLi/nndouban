@@ -125,9 +125,60 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
   `(let* ((directory (make-temp-file "nndouban-test-" t))
           (store (nndouban--load (expand-file-name "snapshot.json" directory)))
           (group (nndouban--ensure-group store "replies.42"))
+          (nndouban--server nil)
           (nndouban--store store))
      (unwind-protect (progn ,@body)
        (delete-directory directory t))))
+
+(ert-deftest nndouban-test-scan-waits-for-import-and-save ()
+  (nndouban-test--store
+    (let (timer)
+      (unwind-protect
+          (cl-letf (((symbol-function 'nndouban-source-notifications)
+                     (lambda (_account callback)
+                       (setq timer
+                             (run-at-time 0.01 nil callback
+                                          (list (list (nndouban-test--discussion))) nil)))))
+            (should (nndouban-request-scan "replies.42"))
+            (should (= 4 (length (plist-get group :entries))))
+            ;; Completion means durable data, not just a scheduled callback.
+            (should (= 4 (length (plist-get
+                                 (nndouban--group
+                                  (nndouban--load (nndouban--db-file store)) "replies.42")
+                                 :entries))))
+            (should-not (gethash "replies.42" (nndouban--db-busy store))))
+        (when timer (cancel-timer timer))))))
+
+(ert-deftest nndouban-test-scan-reports-fetch-failure ()
+  (nndouban-test--store
+    (nndouban--import store group (nndouban-test--discussion))
+    (let ((old (copy-tree (plist-get group :entries))))
+      (cl-letf (((symbol-function 'nndouban-source-notifications)
+                 (lambda (_account callback) (funcall callback nil "HTTP 403"))))
+        (should-not (nndouban-request-scan "replies.42"))
+        (should (string-match-p "HTTP 403" nndouban-status-string))
+        (should (equal old (plist-get group :entries)))
+        (should-not (gethash "replies.42" (nndouban--db-busy store)))))))
+
+(ert-deftest nndouban-test-scan-timeout-keeps-pending-update-busy ()
+  (nndouban-test--store
+    (let ((nndouban-scan-timeout 0.01) callback)
+      (cl-letf (((symbol-function 'nndouban-source-notifications)
+                 (lambda (_account finish) (setq callback finish))))
+        (should-not (nndouban-request-scan "replies.42"))
+        (should (string-match-p "timed out" nndouban-status-string))
+        (should (gethash "replies.42" (nndouban--db-busy store)))
+        (funcall callback nil "late failure")
+        (should-not (gethash "replies.42" (nndouban--db-busy store)))))))
+
+(ert-deftest nndouban-test-scan-does-not-report-busy-group-as-success ()
+  (nndouban-test--store
+    (puthash "replies.42" t (nndouban--db-busy store))
+    (cl-letf (((symbol-function 'nndouban-source-notifications)
+               (lambda (&rest _) (ert-fail "Duplicate update launched"))))
+      (should-not (nndouban-request-scan "replies.42"))
+      (should (string-match-p "already updating" nndouban-status-string))
+      (should (gethash "replies.42" (nndouban--db-busy store))))))
 
 (ert-deftest nndouban-test-aggregation-stable-numbers-and-restart ()
   (nndouban-test--store

@@ -74,6 +74,12 @@ It must apply domain, path, expiry and container filtering for that URL."
   "Maximum request duration in seconds."
   :type 'number :group 'nndouban)
 
+(defcustom nndouban-scan-timeout 120
+  "Maximum time in seconds to wait for one group's complete scan.
+This includes all requests made while updating that group.  A timed-out
+update may still finish later; it remains busy until its callback runs."
+  :type 'number :group 'nndouban)
+
 (defconst nndouban-topic--user-agent
   "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0")
 
@@ -1728,10 +1734,24 @@ Return numbers of notification roots which received new direct replies."
         (error (finish nil (error-message-string problem)))))))
 
 (deffoo nndouban-request-scan (&optional group server)
-  (let ((store (nndouban--select server)))
-    (dolist (name (if group (list group) (mapcar (lambda (g) (plist-get g :name)) (nndouban--db-groups store))))
-      (unless (gethash name (nndouban--db-busy store)) (nndouban-update name server))))
-  t)
+  (condition-case problem
+      (let ((store (nndouban--select server)))
+        (dolist (name (if group (list group)
+                       (mapcar (lambda (g) (plist-get g :name))
+                               (nndouban--db-groups store))))
+          (let ((deadline (+ (float-time) nndouban-scan-timeout))
+                done failure)
+            ;; Gnus expects the snapshot to be ready when request-scan
+            ;; returns.  Commercial Gnus calls this in its scanner thread.
+            (nndouban-update name server
+                            (lambda (error) (setq failure error done t)))
+            (while (and (not done) (< (float-time) deadline))
+              (accept-process-output nil 0.05))
+            (unless done
+              (error "Douban scan timed out for %s; update is still pending" name))
+            (when failure (error "%s: %s" name failure))))
+        t)
+    (error (nnheader-report 'nndouban "%s" (error-message-string problem)))))
 
 (defun nndouban--subscribe (name)
   "Create/update NAME, then open its Gnus overview."
