@@ -40,7 +40,7 @@
   id parent-id (author "") (body "") (body-format 'plain) url time
   children-cursor placeholder-p)
 (cl-defstruct nndouban-web-discussion
-  id url (title "Discussion") entries cursor)
+  id url (title "") entries cursor)
 (cl-defstruct nndouban-web-page entries cursor)
 (cl-defstruct nndouban-web-send-error message uncertain)
 
@@ -92,23 +92,6 @@ update may still finish later; it remains busy until its callback runs."
   (if (fboundp 'dom-inner-text)
       (dom-inner-text node)
     (with-no-warnings (dom-texts node))))
-
-(defun nndouban-topic--summary-text (node)
-  "Extract NODE's text, separating block elements for a short summary."
-  (if (stringp node) node
-    (concat (mapconcat #'nndouban-topic--summary-text
-                       (dom-children node) "")
-            (if (memq (dom-tag node) '(p div li br)) " " ""))))
-
-(defun nndouban-topic--summary (body id)
-  "Use the opening text of BODY as a title, falling back to topic ID."
-  (let ((text (string-trim
-               (replace-regexp-in-string
-                "[[:space:][:cntrl:]]+" " "
-                (nndouban-topic--summary-text body)))))
-    (if (string-empty-p text)
-        (concat "豆瓣话题 " id)
-      (truncate-string-to-width text 80 nil nil "…"))))
 
 (defun nndouban-topic--topic-id (url)
   "Return the personal or group topic ID in URL, or nil."
@@ -278,9 +261,7 @@ CALLBACK receives (BODY ERROR).  Never follow credential-bearing redirects."
       (error "Douban topic content missing; check login, page access or a changed page layout"))
     (make-nndouban-web-discussion
      :id topic-id :url url
-     :title (let ((text (and title (string-trim (nndouban-topic--text title)))))
-              (if (or (null text) (string-empty-p text))
-                  (nndouban-topic--summary body topic-id) text))
+     :title (if title (string-trim (nndouban-topic--text title)) "")
      :entries
      (list (make-nndouban-web-entry
             :id (concat "topic:" topic-id) :url url
@@ -975,24 +956,6 @@ redirects are followed; never resend a POST after a redirect."
        (format "<blockquote>%s</blockquote>"
                (nndouban-source--status-html reshared))))))
 
-(defun nndouban-source--status-title (status)
-  "Return a useful title for Douban STATUS."
-  (let* ((author (plist-get status :author))
-         (name (or (plist-get author :name) "豆瓣用户"))
-         (activity (or (plist-get status :activity) ""))
-         (card (plist-get status :card))
-         (text (string-trim (replace-regexp-in-string
-                             "[\n\r]+" " "
-                             (or (plist-get status :text) "")))))
-    (string-trim
-     (format "%s %s: %s%s"
-             name activity
-             (if-let* ((card-title (plist-get card :title))
-                       ((not (string-empty-p card-title))))
-                 (format "《%s》" card-title)
-               "")
-             text))))
-
 (cl-defstruct (nndouban-source-backend (:include nndouban-topic-backend))
   account direct-ids root-author-id)
 
@@ -1037,7 +1000,7 @@ redirects are followed; never resend a POST after a redirect."
                   (if user (format "https://www.douban.com/people/%s/status/%s/" user id)
                     (format "https://m.douban.com/status/%s/" id)))))
     (make-nndouban-web-discussion
-     :id id :url url :title (nndouban-source--status-title status)
+     :id id :url url :title ""
      :cursor '(:kind comments :start 0)
      :entries (list (make-nndouban-source-entry
                      :id (concat "status:" id) :author (or (plist-get author :name) "豆瓣用户")
@@ -1551,25 +1514,18 @@ Return numbers of notification roots which received new direct replies."
   "Create a Gnus mail header for ENTRY in GROUP."
   (let* ((root (nndouban--entry group (plist-get entry :root)))
          (pending (length (plist-get root :pending)))
-         (stored-title (plist-get entry :title))
-         (display-title
-          (if (and (null (plist-get entry :parent))
-                   (stringp stored-title)
-                   (string-match-p "\\`豆瓣话题 [0-9]+\\'" stored-title)
-                   (equal (plist-get entry :format) "html")
-                   (stringp (plist-get entry :body)))
-              (condition-case nil
-                  (with-temp-buffer
-                    (insert (plist-get entry :body))
-                    (nndouban-topic--summary
-                     (libxml-parse-html-region (point-min) (point-max))
-                     (plist-get entry :discussion-id)))
-                (error stored-title))
-            stored-title))
-         (title (concat (unless (null (plist-get entry :parent)) "Re: ")
-                        (nndouban--line display-title)
-                        (when (and (null (plist-get entry :parent)) (> pending 0))
-                          (format " [%d 条新回应]" pending)))))
+         (stored-title (nndouban--line (plist-get entry :title)))
+         ;; Older snapshots synthesized subjects for broadcasts and
+         ;; titleless topics.  Do not expose those known placeholders.
+         (subject (if (or (string-prefix-p "status:" (or (plist-get root :local-id) ""))
+                          (equal stored-title
+                                 (concat "豆瓣话题 " (or (plist-get entry :discussion-id) ""))))
+                      "" stored-title))
+         (title (if (string-empty-p subject) ""
+                  (concat (unless (null (plist-get entry :parent)) "Re: ")
+                          subject
+                          (when (and (null (plist-get entry :parent)) (> pending 0))
+                            (format " [%d 条新回应]" pending))))))
     (make-full-mail-header
      (plist-get entry :number) title
      (concat (nndouban--line (plist-get entry :author)) " <"

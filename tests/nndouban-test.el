@@ -3,26 +3,34 @@
 (require 'nndouban)
 (require 'gnus-thread-reader)
 
-(ert-deftest nndouban-test-titleless-topic-uses-opening-text ()
+(ert-deftest nndouban-test-titleless-topic-keeps-empty-subject ()
   (let* ((html "<div id='content'><div class='topic-richtext'><p>第一段 有内容。</p><p>第二段。</p></div></div>")
          (discussion (nndouban-topic--html
                       html "https://www.douban.com/topic/123456/")))
-    (should (equal "第一段 有内容。 第二段。"
-                   (nndouban-web-discussion-title discussion)))
-    (should (equal "豆瓣话题 123456"
-                   (nndouban-topic--summary
-                    '(div nil (img ((src . "x")))) "123456")))))
+    (should (equal "" (nndouban-web-discussion-title discussion)))
+    (should (string-match-p "第一段" (nndouban-web-entry-body
+                                       (car (nndouban-web-discussion-entries discussion)))))))
 
-(ert-deftest nndouban-test-cached-titleless-topic-header-uses-body ()
-  (let* ((entry (list :number 1 :root "<topic.123456.topic.123456@douban.invalid>"
-                      :message-id "<topic.123456.topic.123456@douban.invalid>"
-                      :discussion-id "123456" :title "豆瓣话题 123456"
-                      :author "作者" :format "html"
-                      :body "<div><p>缓存里的第一段。</p><p>接下来的内容。</p></div>"))
-         (group (list :kind "topic" :entries (list entry)))
-         (header (nndouban--header entry group)))
-    (should (equal "缓存里的第一段。 接下来的内容。"
-                   (mail-header-subject header)))))
+(ert-deftest nndouban-test-cached-titleless-header-stays-empty ()
+  (dolist (legacy '("" "豆瓣话题 123456"))
+    (let* ((entry (list :number 1 :root "root" :message-id "root"
+                        :discussion-id "123456" :title legacy :pending '("reply")
+                        :author "作者" :format "html" :body "<p>正文内容。</p>"))
+           (group (list :kind "topic" :entries (list entry))))
+      (should (equal "" (mail-header-subject (nndouban--header entry group))))
+      (setf (plist-get entry :parent) "parent")
+      (should (equal "" (mail-header-subject (nndouban--header entry group)))))))
+
+(ert-deftest nndouban-test-status-never-synthesizes-subject ()
+  (let* ((discussion (nndouban-source--status-discussion
+                      '(:id "123" :author (:id "7" :name "作者")
+                        :activity "想读" :text "正文" :card (:title "书名"))))
+         (entry (list :number 1 :root "root" :message-id "root"
+                      :local-id "status:123" :title "作者 想读: 《书名》正文"
+                      :body "正文"))
+         (group (list :entries (list entry))))
+    (should (equal "" (nndouban-web-discussion-title discussion)))
+    (should (equal "" (mail-header-subject (nndouban--header entry group))))))
 
 (ert-deftest nndouban-test-group-listing-and-stable-topic-number ()
   (let* ((html "<table class='olt'><tr class='th'><td>讨论</td></tr>
@@ -213,7 +221,8 @@ title='地球上最后的夜晚'>地球上最后的夜晚</a></td>
             (should (eq 'nov (nndouban-retrieve-headers '(1 2 3 4) "replies.42")))
             (with-current-buffer nntp-server-buffer
               (should (= 1 (count-lines (point-min) (point-max))))
-              (should (string-match-p "2 条新回应" (buffer-string))))
+              (should (string-prefix-p "1\t\t" (buffer-string))))
+            (should (= 2 (length (plist-get (nndouban--entry group 1) :pending))))
             (let ((headers (nndouban-request-thread (nndouban--header (nndouban--entry group 1) group) "replies.42")))
               (should (= 4 (length headers)))
               (should (equal (mail-header-references (nth 2 headers)) "<status.123.comment.1@douban.invalid>")))
